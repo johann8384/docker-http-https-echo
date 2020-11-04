@@ -1,11 +1,132 @@
-my-http-listener:
-    image: mendhak/http-https-echo
-    environment: 
-        - HTTP_PORT=8888
-        - HTTPS_PORT=9999
+version: '3.7'
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:latest
     ports:
-        - "8080:8888"
-        - "8443:9999"
-    # volumes:
-    #     - /etc/ssl/certs/ssl-cert-snakeoil.pem:/app/fullchain.pem
-    #     - /etc/ssl/private/ssl-cert-snakeoil.key:/app/privkey.pem
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778/tcp"
+      - "14268:14268/tcp"
+      - "16686:16686/tcp"
+      - "14242:14242/tcp"
+    command: ["--sampling.strategies-file=/etc/jaeger/sampling_strategies.json", "--admin-http-port=14242", "--metrics-backend=prometheus", "--metrics-http-route=/metrics"]
+    networks:
+      - echo-server
+
+  echo-server:
+    build: .
+    ports:
+      - "8180:8180/tcp"
+      - "8443:8443/tcp"
+    environment:
+      - JAEGER_SERVICE_NAME=echo-server
+      - JAEGER_AGENT_HOST=jaeger
+      - JAEGER_AGENT_PORT=6831
+      - JAEGER_AGENT_SOCKET_TYPE=udp4
+      - JAEGER_ENDPOINT=http://jaeger:14268/api/traces
+      - JAEGER_REPORTER_LOG_SPANS=true
+      - JAEGER_DISABLED=false
+      - HTTP_PORT=8180
+      - HTTPS_PORT=8443
+    networks:
+      - echo-server
+    depends_on:
+      - jaeger
+
+# https://github.com/vegasbrianc/prometheus/tree/master/prometheus
+  prometheus:
+    image: prom/prometheus
+    volumes:
+      - ./etc/prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - 9090:9090
+    links:
+      - cadvisor:cadvisor
+      - alertmanager:alertmanager
+    depends_on:
+      - cadvisor
+    networks:
+      - echo-server
+    restart: always
+
+  node-exporter:
+    image: prom/node-exporter
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    ports:
+      - 9100:9100
+    networks:
+      - echo-server
+
+  alertmanager:
+    image: prom/alertmanager
+    ports:
+      - 9093:9093
+    volumes:
+      - ./etc/alertmanager/:/etc/alertmanager/
+    networks:
+      - echo-server
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+
+  cadvisor:
+    image: google/cadvisor
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    ports:
+      - 8080:8080
+    networks:
+      - echo-server
+
+  grafana:
+    image: grafana/grafana
+    user: "472"
+    depends_on:
+      - prometheus
+      - jaeger
+      - loki
+    ports:
+      - 3000:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./etc/grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+      - ./etc/grafana/config.monitoring
+    networks:
+      - echo-server
+
+  loki:
+    image: grafana/loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./etc/loki/local-config.yml:/etc/loki/local-config.yml
+    command: -config.file=/etc/loki/local-config.yml
+    networks:
+      - echo-server
+
+networks:
+  echo-server:
+
+volumes:
+    prometheus_data: {}
+    grafana_data: {}
+
